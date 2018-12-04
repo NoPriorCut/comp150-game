@@ -2,6 +2,9 @@ import pygame
 import random
 import ImageFiles
 import Helper
+import copy
+from Helper import HEALTH_BAR_THRESHOLDS as THRESHOLDS
+from Helper import HEALTH_BAR_COLOURS as COLOURS
 import Projectile
 import TimeOfDay
 # Classes used by Entity type Objects
@@ -10,6 +13,49 @@ pygame.init()
 
 # Contains all enemies that are currently being displayed
 enemy_list = []
+
+health_bars = []
+
+
+class HealthBar:
+
+    def __init__(self, entity):
+        self.size = [entity.sprite.get_width()
+                     if type(entity) == Enemy
+                     else entity.playerSurf.get_width(),
+                     Helper.HEALTH_BAR_SIZE[1]]
+        self.max_health = entity.health
+        self.health = self.max_health
+        self.parent = entity
+        self.colour = COLOURS[len(COLOURS) - 1]
+        self.pos = [0, 0]
+        self.pos[0] = entity.pos[0] \
+            if type(entity) == Enemy \
+            else entity.playerPos[0]
+        self.pos[1] = entity.pos[1] + int(entity.rect.height) \
+            if type(entity) == Enemy \
+            else entity.playerPos[1]
+
+        health_bars.append(self)
+
+    def colour_update(self):
+        if self.health <= 0:
+            health_bars.remove(self)
+        for i in range(0, len(THRESHOLDS)):
+            if self.health <= int(self.max_health * THRESHOLDS[i]):
+                self.colour = COLOURS[i]
+                return
+
+    def health_bar_update(self):
+        self.health = self.parent.health
+        self.pos[0] = self.parent.pos[0] \
+            if type(self.parent) == Enemy \
+            else self.parent.playerPos[0]
+        self.pos[1] = self.parent.pos[1] + int(self.parent.rect.height) \
+            if type(self.parent) == Enemy \
+            else self.parent.playerPos[1] - 10
+        if self.parent.health < self.max_health:
+            self.colour_update()
 
 
 class Entity:
@@ -29,7 +75,10 @@ class Entity:
     def __init__(self):
         # subname is a unique identifier that uses the index
         self.subname = 'Entity' + str(Entity.entity_index)
-        name = 'Placeholder name'
+
+        # name for flavour
+        self.name = 'Placeholder name'
+
         # Importing index into the Entity-specific variable
         self.index = Entity.entity_index
 
@@ -40,8 +89,14 @@ class Entity:
         self.on_encounter = False
         self.on_battle = False
 
+        # level of entity
+        self.level = 1
+
         # setting alignment to passive as a default
         self.alignment = Entity.entity_alignment[1]
+
+        # setting all stats to the default values from the Helper
+        self.stats = copy.deepcopy(Helper.STATS)
 
         # To do: define states, as to specify what
         # images and animations to incorporate into lists
@@ -50,33 +105,48 @@ class Entity:
 class Enemy(Entity):
     """
     ---------------------------------------------------------------------------
-    Enemy class. Class of enemies.
+    Enemy class. Used for creating entities that attack the player regularly.
+    Their stats increase along with the room they are in
     ---------------------------------------------------------------------------
     """
-    # todo: fill this in ^
 
     numberOfOnscreenEnemies = 0
 
     def __init__(self, room=None):
         Entity.__init__(self)
+
+        if room is None:
+            raise(ValueError, 'Room not specified for enemy')
+
         self.on_battle = True
         self.room = room
+
+        self.level = random.randint(max(1, room.index - 5), room.index + 1)
+
+        for stat_key in self.stats.keys():
+            self.stats[stat_key]['Value'] += random.randint(
+                min(self.level, room.index),
+                max(self.level, room.index))
+
         self.alignment = Entity.entity_alignment[0]
-        self.health = int(Entity.defaultHealth * (room.index / 10))  # * (enemyLevel * 0.1)
+
+        self.health = self.stats['CON']['Value'] * 10 + 5 * self.level
+
         self.sprite = ImageFiles.images['Enemy']  # [random.randint(0, len(ImageFiles.images) - 1)]
-        self.chance_to_attack = 10 * room.index + 1
+
+        self.chance_to_attack = 10 + 5 * self.stats['DEX']['Value']
 
         self.last_attack = pygame.time.get_ticks()
 
         self.attack_cooldown = \
-            random.randint(300, 500) - room.index * 10
+            random.randint(300, 500) - int(self.stats['DEX']['Value'] ** 1.1)
 
         self.max_attack_chance = 1000
 
         lane_is_occupied = True
         self.lane_key = 'middle'
 
-        self.base_damage = 10 + random.randint(0, room.index)
+        self.base_damage = self.stats['STR']['Value']
 
         self.damage = self.calculate_damage
 
@@ -99,6 +169,8 @@ class Enemy(Entity):
         self.rect.y = self.pos[1]
         Enemy.numberOfOnscreenEnemies += 1
 
+        self.healthBar = HealthBar(self)
+
     def calculate_damage(self):
         """
         =======================================================================
@@ -107,7 +179,9 @@ class Enemy(Entity):
         :return: damage to enemy
         =======================================================================
         """
-        return self.base_damage * TimeOfDay.TimeOfDay.MonsterBuff
+        return self.base_damage\
+            * TimeOfDay.TimeOfDay.MonsterBuff\
+            * int(self.stats['STR']['Value'] ** 1.3)
 
     def is_hit(self, damage):
         """
@@ -121,6 +195,7 @@ class Enemy(Entity):
         # print('\'tis a hit: ' + str(self.health) + ' hp remaining')
         # play_sound(enemy_hit)
         if self.health <= 0:
+            Projectile.PlayerProjectile.grant_exp(100 * self.level)
             self.__del__()
 
     def enemy_attack(self):
@@ -143,23 +218,13 @@ class Enemy(Entity):
         Deletes enemy instance, and lowers number of onscreen enemies.
         =======================================================================
         """
-        try:
-            Helper.LANES[self.lane_key][1] = False
-            Enemy.numberOfOnscreenEnemies -= 1
-            enemy_list.remove(enemy_list[enemy_list.index(self)])
+        for projectile in Projectile.attackSprites:
+            if projectile.parent == self:
+                Projectile.attackSprites.remove(projectile)
+        Helper.LANES[self.lane_key][1] = False
+        Enemy.numberOfOnscreenEnemies = \
+            max(0, Enemy.numberOfOnscreenEnemies - 1)
+        if self in enemy_list:
+            enemy_list.remove(self)
+        else:
             del self
-        except ValueError:
-            del self
-            print('Thank you for playing Wing Commander!')
-
-
-class EnemyBoss(Enemy):
-    """
-    ---------------------------------------------------------------------------
-    Boss enemy class. Class of enemy bosses.
-    ---------------------------------------------------------------------------
-    """
-    # todo: fill this in also ^
-
-    def __init__(self):
-        Enemy.__init__(self)
